@@ -1,101 +1,144 @@
-const { chromium } = require('playwright');
-const fs = require('fs');
-const { Client } = require('pg');
-const cuid = require('cuid');
-require('dotenv').config();
+const { chromium } = require('playwright')
+const fs = require('fs')
+const { Client } = require('pg')
+const cuid = require('cuid')
+require('dotenv').config()
 
 const processBody = (body, link, resource = 'NPR') => {
-    let formattedBody = '';
-  
-    if (body !== null) {
-      formattedBody += `<p>${body}</p><br><br><ul><li><a href='${link}'>Visit ${resource}</a></li></ul>`;
-    }
-  
-    if (link && !body) {
-      formattedBody += `<br><br><ul><li><a href='${link}'>Visit article @ ${resource}</a></li></ul>`;
-    } else if (!link && !body) {
-      formattedBody = '';
-    }
-  
-    return formattedBody;
-  };
+  let formattedBody = ''
 
-(async () => {
+  if (body !== null) {
+    formattedBody += `<p>${body}</p><br><br><ul><li><a href='${link}'>Visit ${resource}</a></li></ul>`
+  }
+
+  if (link && !body) {
+    formattedBody += `<br><br><ul><li><a href='${link}'>Visit article @ ${resource}</a></li></ul>`
+  } else if (!link && !body) {
+    formattedBody = ''
+  }
+
+  return formattedBody
+}
+
+;(async () => {
   const client = new Client({
-    connectionString: process.env.POSTGRES_CONNECTION_STRING,
-  });
+    connectionString: process.env.POSTGRES_CONNECTION_STRING
+  })
 
-  console.log('Connecting to the database...');
+  console.log('Connecting to the database...')
   try {
-    await client.connect();
-    console.log('Connected to the database successfully.');
+    await client.connect()
+    console.log('Connected to the database successfully.')
 
-    await client.query('DELETE FROM "Article" WHERE resource = $1', ['NPR']);
-    console.log('Truncated existing articles with resource "NPR".');
+    await client.query('DELETE FROM "Article" WHERE resource = $1', ['NPR'])
+    console.log('Truncated existing articles with resource "NPR".')
 
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+    const browser = await chromium.launch({ headless: true })
+    const page = await browser.newPage()
 
-    console.log('Navigating to NPR News section...');
+    console.log('Navigating to NPR News section...')
     try {
       await page.goto('https://www.npr.org/sections/news/', {
         waitUntil: 'domcontentloaded',
-        timeout: 60000,
-      });
-      console.log('Page loaded successfully');
+        timeout: 6000
+      })
+      console.log('Page loaded successfully')
     } catch (error) {
-      console.error('Failed to load NPR News page:', error);
-      await browser.close();
-      await client.end();
-      return;
+      console.error('Failed to load NPR News page:', error)
+      await browser.close()
+      await client.end()
+      return
     }
 
     // Scrape the articles
     const articles = await page.$$eval('.item', items =>
       items.map(item => {
-        const headline = item.querySelector('.title a')?.innerText.trim();
-        const link = item.querySelector('.title a')?.href.trim();
-        const imageUrl = item.querySelector('.item-image img')?.src || '';
-        const date = item.querySelector('.teaser time')?.getAttribute('datetime').trim();
-        const slug = headline.split(' ').slice(0, 3).join('').toLowerCase().replace(/[^a-z]/g, '');
-        return { headline, link, imageUrl, date, slug };
+        const headline = item.querySelector('.title a')?.innerText.trim()
+        const link = item.querySelector('.title a')?.href.trim()
+        const date = item
+          .querySelector('.teaser time')
+          ?.getAttribute('datetime')
+          .trim()
+        const slug = headline
+          .split(' ')
+          .slice(0, 3)
+          .join('')
+          .toLowerCase()
+          .replace(/[^a-z]/g, '')
+        const resource = 'NPR'
+        return { headline, link, date, slug, resource }
       })
-    );
+    )
 
-    console.log('Collected headlines and links:', articles);
+    console.log('Collected headlines and links:', articles)
 
     for (const article of articles) {
-      console.log(`Visiting article: ${article.headline}`);
+      console.log(`Visiting article: ${article.headline}`)
 
-      let success = false;
-      let attempts = 0;
-      const maxAttempts = 3;
+      let success = false
+      let attempts = 0
+      const maxAttempts = 3
 
       while (!success && attempts < maxAttempts) {
-        attempts++;
+        attempts++
         try {
           await page.goto(article.link, {
             waitUntil: 'domcontentloaded',
-            timeout: 6000,
-          });
+            timeout: 6000
+          })
+
+          try {
+            const media = await page.$eval(
+              'div.imagewrap.has-source-dimensions picture img',
+              img => img.getAttribute('src')
+            )
+            article.media = media
+          } catch (error) {
+            console.error('Error finding media content: ', error)
+            article.media = ''
+          }
 
           try {
             const bodyContent = await page.$$eval('#storytext p', paragraphs =>
               paragraphs.map(p => p.innerText.trim()).join('\n\n')
-            );
+            )
 
             article.summary =
-              bodyContent.split(' ').slice(0, 25).join(' ') + '...';
-            article.body = processBody(bodyContent, article.link);
+              bodyContent.split(' ').slice(0, 25).join(' ') + '...'
+            article.body = processBody(bodyContent, article.link)
           } catch (err) {
-            console.error('Error finding body content: ', err);
-            article.summary = '';
-            article.body = '';
+            console.error('Error finding body content: ', err)
+            article.summary = ''
+            article.body = ''
           }
 
+          article.resource = 'NPR'
 
-          article.author = 'NPR'; // Default author if not found
-          article.id = cuid();
+          try {
+            const author = await page.$eval('.byline__name a', name =>
+              name.innerText.trim()
+            )
+            article.author = author
+          } catch (err) {
+            try {
+              const author = await page.$eval(
+                '.byline__name byline__name--block a',
+                name => name.innerText.trim()
+              )
+              article.author = author
+            } catch (err) {
+              try {
+                const author = await page.$eval('.byline__name', element =>
+                    element.innerText.trim()
+                )
+                article.author = author
+              } catch (err) {
+                console.error('Error finding author: ', err)
+                article.author = 'See article for details'
+              }
+            }
+          }
+          article.id = cuid()
 
           // Insert article into the database
           await client.query(
@@ -108,30 +151,40 @@ const processBody = (body, link, resource = 'NPR') => {
               article.summary || '',
               article.body || '',
               article.author,
-              'NPR',
-              article.imageUrl,
+              article.resource,
+              article.media,
               article.link,
-              new Date(article.date).toISOString(),
+              new Date(article.date).toISOString()
             ]
-          );
+          )
 
-          success = true;
-          console.log(`Collected and saved data for article: ${article.headline}`);
+          success = true
+          console.log(
+            `Collected and saved data for article: ${article.headline}`
+          )
         } catch (error) {
-          console.error(`Error processing article: ${article.headline}, attempt ${attempts}`, error);
+          console.error(
+            `Error processing article: ${article.headline}, attempt ${attempts}`,
+            error
+          )
           if (attempts >= maxAttempts) {
-            console.error(`Failed to load article after ${maxAttempts} attempts.`);
+            console.error(
+              `Failed to load article after ${maxAttempts} attempts.`
+            )
           }
         }
       }
     }
 
-    fs.writeFileSync('npr-news-articles.json', JSON.stringify(articles, null, 2));
-    await browser.close();
+    fs.writeFileSync(
+      'npr-news-articles.json',
+      JSON.stringify(articles, null, 2)
+    )
+    await browser.close()
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error:', error)
   } finally {
-    await client.end();
-    console.log('Database connection closed.');
+    await client.end()
+    console.log('Database connection closed.')
   }
-})();
+})()

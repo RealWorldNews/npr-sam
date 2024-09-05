@@ -1,5 +1,6 @@
-const { chromium } = require('playwright');
-const fs = require('fs');
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = 1;
+const chromium = process.env.AWS_EXECUTION_ENV ? require('@sparticuz/chromium') : null;
+const puppeteer = require('puppeteer');
 const { Client } = require('pg');
 const cuid = require('cuid');
 require('dotenv').config();
@@ -35,7 +36,16 @@ const insertArticleIntoDatabase = async (client, article) => {
   );
 };
 
-(async () => {
+exports.handler = async (event, context) => {
+  const websiteUrl = event.url || 'https://www.npr.org/sections/news/'; // Use the NPR News URL directly or pass via event
+
+  if (!websiteUrl) {
+    return {
+      statusCode: 400,
+      body: JSON.stringify('URL is required')
+    };
+  }
+
   const client = new Client({
     connectionString: process.env.POSTGRES_CONNECTION_STRING
   });
@@ -48,12 +58,18 @@ const insertArticleIntoDatabase = async (client, article) => {
     await client.query('DELETE FROM "Article" WHERE resource = $1', ['NPR']);
     console.log('Truncated existing articles with resource "NPR".');
 
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+    const browser = await puppeteer.launch({
+      args: chromium ? chromium.args : [],
+      defaultViewport: chromium ? chromium.defaultViewport : null,
+      executablePath: chromium ? await chromium.executablePath() : puppeteer.executablePath(),
+      headless: chromium ? chromium.headless : true,
+      ignoreHTTPSErrors: true,
+    });
 
+    const page = await browser.newPage();
     console.log('Navigating to NPR News section...');
     try {
-      await page.goto('https://www.npr.org/sections/news/', {
+      await page.goto(websiteUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 6000
       });
@@ -62,7 +78,10 @@ const insertArticleIntoDatabase = async (client, article) => {
       console.error('Failed to load NPR News page:', error);
       await browser.close();
       await client.end();
-      return;
+      return {
+        statusCode: 500,
+        body: JSON.stringify('Failed to load the website')
+      };
     }
 
     // Scrape the articles
@@ -100,8 +119,8 @@ const insertArticleIntoDatabase = async (client, article) => {
         attempts++;
         try {
           await page.goto(article.link, {
-            waitUntil: 'domcontentloaded',
-            timeout: 6000
+            waitUntil: 'networkidle0',
+            timeout: 30000
           });
 
           try {
@@ -169,15 +188,22 @@ const insertArticleIntoDatabase = async (client, article) => {
       }
     }
 
-    fs.writeFileSync(
-      'npr-news-articles.json',
-      JSON.stringify(articles, null, 2)
-    );
     await browser.close();
+
+    const response = {
+      statusCode: 200,
+      body: JSON.stringify({ message: 'Scraping completed successfully', articles }),
+    };
+
+    return response;
   } catch (error) {
     console.error('Error:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify('An error occurred during scraping'),
+    };
   } finally {
     await client.end();
     console.log('Database connection closed.');
   }
-})();
+};
